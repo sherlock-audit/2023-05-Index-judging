@@ -3,7 +3,7 @@
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/251 
 
 ## Found by 
-0x52, 0xGoodess, 0xStalin, BugBusters, Cryptor, hildingr, volodya
+0x52, 0xGoodess, 0xStalin, Cryptor, hildingr, volodya
 ## Summary
 
 Enabling eMode allows assets of the same class to be borrowed at much higher a much higher LTV. The issue is that the current implementation makes the incorrect calls to the Aave V3 pool making so that the pool can never take advantage of this higher LTV.
@@ -82,6 +82,11 @@ Btw: I think I saw a bunch of duplicates of this issue when looking through the 
 
 Agree with sponsor, valid high. Added missing duplicates
 
+**ckoopmann**
+
+Fixed in below pr by keeping track of the current eMode category id and then getting the data for that specific eMode (if eMode category is not 0):
+https://github.com/IndexCoop/index-coop-smart-contracts/pull/142
+
 # Issue H-2: _calculateMaxBorrowCollateral calculates repay incorrectly and can lead to set token liquidation 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/254 
@@ -131,6 +136,11 @@ Don't adjust the max value by `unutilizedLeveragPercentage`
 **pblivin0x**
 
 The outlined issue and fix LGTM. We need to loosen the performed `netRepayLimit` check to avoid the case where we have high leverage and can't submit repayment (`borrowValue > liquidationThreshold * (1 - unutilizedLeveragPercentage)`)
+
+**ckoopmann**
+
+Fixed in the below PR by removing the `unutilizedLeveragPercentage` adjustment as suggested:
+https://github.com/IndexCoop/index-coop-smart-contracts/pull/142
 
 # Issue M-1: setIncentiveSettings would be halt during a rebalance operation that gets stuck due to supply cap is reached at Aave 
 
@@ -196,6 +206,7 @@ Add some checks on whether the supply cap of an Aave market is reached during a 
 
 
 
+
 ## Discussion
 
 **ckoopmann**
@@ -218,12 +229,19 @@ I believe the current plan for avoiding any Aave supply cap issues is by imposin
 
 As discussed with sponsor, valid medium
 
+**ckoopmann**
+
+Fixed the issue of settings being bricked in the mentioned scenario by adding an override flag that can be set by the operator:
+https://github.com/IndexCoop/index-coop-smart-contracts/pull/142/commits/edbe0b04a1966ada1e0a4f9c89cbb9e2f475a440
+
+Generally I don't see a way to reliably protect against hitting the supply cap, however it should not endanger users funds as redeeming as well as levering down are not affected. (only minting new set tokens as well as levering up would be blocked, which is a know limitation)
+
 # Issue M-2: Protocol doesn't completely protect itself from `LTV = 0` tokens 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/159 
 
 ## Found by 
-Angry\_Mustache\_Man, Bauchibred, BugBusters, hildingr, volodya
+Bauchibred, hildingr, volodya
 
 ## Summary
 
@@ -332,6 +350,7 @@ The protocol should consider implementing additional protections against tokens 
 
 
 
+
 ## Discussion
 
 **ckoopmann**
@@ -369,7 +388,128 @@ While the issue seems to be valid, if the above understanding is correct we migh
 Keeping the issue as a med because there is still a small possibility for this to happen even though it is not the intended behavior: 
 `he Set Token could have another aToken as a component that is not managed as part of the leverage strategy but this should be avoided and is certainly not part of the expected use`
 
-# Issue M-3: no validation to ensure the arbitrum sequencer is down 
+# Issue M-3: Loss of user funds  - unchecked Return of ERC20 Transfer 
+
+Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/169 
+
+## Found by 
+0x007, Bauchibred, bitsurfer, shogoki
+## Summary
+
+Silently failing transfers can result in a partial or total loss of the users investment.
+
+## Vulnerability Detail
+
+
+Some ERC20 Tokens do not revert on failure of the transfer function, but return a bool value instead. Some do not return any value. Therefore it is required to check if a value was returned, and if true, which value it is. This is not done on some places in these contracts.
+
+The `DebtIssuanceModulev2`, which is required to issue or redeem tokens whenever there is a LeverageModule involved uses the `invokeTransfer` function of the `Invoke` library to transfer ERC20 Tokens from the `SetToken` to the user.
+
+`invokeTransfer` is encoding the Calldata for the regular `transfer` function of ERC20 tokens and  passes it together with the target (ERC20 token address) the SetTokens generic `invoke` function, whichin turn uses `functionCallWithValue` from the Openzeppelin Address Library. This method is bubbling up a possible revert of the call and returning the raw data.
+
+The generic `invoke` is returning this raw data, however in `invokeTransfer` the return value of `invoke` is ignored and not used. 
+As some ERC20 Tokens do not revert on a failed transfer, but instead return a `false` bool value, the stated behaviour can lead to silently failing transfers.
+
+This is inside the `DebtIssuanceModulev2` used to:
+
+1. Transfer The "debt" (borrowed) Tokens to the user at Issuance
+2. Transfer back the main component Tokens (e.g. aTokens) to the user at Redemption
+
+If such a Transfer silently fails, the funds will remain inside the setToken contract and the user has no chance to recover them.
+
+In the issuance event the user receives the SetTokens but not the borrowed Tokens, which he has to repay when he wants to redeem the tokens. (Results in Loss of the "Debt")
+
+In the redemption event the user repays his debt & bruns his Set Tokens, but never receives his original Tokens back. (Total Loss of investment)
+
+## Impact
+
+Possible Loss of all/part of the Investment for the User
+
+## Code Snippet
+
+Usage of invokeTransfer in`DebtIssuanceModulev2`:
+
+https://github.com/sherlock-audit/2023-05-Index/blob/main/index-protocol/contracts/protocol/modules/v1/DebtIssuanceModuleV2.sol#L283
+
+https://github.com/sherlock-audit/2023-05-Index/blob/main/index-protocol/contracts/protocol/modules/v1/DebtIssuanceModuleV2.sol#L315
+
+`invokeTransfer` function ignores return value of `invoke`:
+
+https://github.com/sherlock-audit/2023-05-Index/blob/main/index-protocol/contracts/protocol/lib/Invoke.sol#L66-L78
+
+`invoke` uses `functionCallwithValue` and returns the raw return Data (which is ignored in this case):
+
+https://github.com/sherlock-audit/2023-05-Index/blob/main/index-protocol/contracts/protocol/SetToken.sol#L197-L212
+ 
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+Check for the existence and value of the returned data of the Transfer call. If there is a return value, it has to be true. This could be achieved by using Openzeppelins SafeERC20 library´s `safeTransfer`.  
+
+
+
+
+## Discussion
+
+**Shogoki**
+
+Escalate for 10USDC 
+This should be considered a valid finding. 
+it backs up the existing escalation on #236
+
+There exists a risk of loosing funds due to missing checks on the transfer calls, as described in the report.
+
+
+
+**sherlock-admin**
+
+ > Escalate for 10USDC 
+> This should be considered a valid finding. 
+> it backs up the existing escalation on #236
+> 
+> There exists a risk of loosing funds due to missing checks on the transfer calls, as described in the report.
+> 
+> 
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**0xffff11**
+
+This should definitely be a duplicate of the [issue that states that the protocol does not work with tokens like USDT](https://github.com/sherlock-audit/2023-05-Index-judging/issues/268). This is just a superset of that issue that has the same fix. 
+
+**Shogoki**
+
+> This should definitely be a duplicate of the [issue that states that the protocol does not work with tokens like USDT](https://github.com/sherlock-audit/2023-05-Index-judging/issues/268). This is just a superset of that issue that has the same fix.
+
+No it should not. It should be a valid issue together with duplicates like:
+ #155, #236 and #280 
+ 
+This issue is not about USDT. It is about Tokens that do not revert on failure, which can lead to a silently failed transfer.
+ 
+
+**hrishibhat**
+
+Result:
+Medium
+Has duplicates 
+Considering this and its duplicates a separate issue as its core issue is different from #314 
+
+**sherlock-admin2**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [Shogoki](https://github.com/sherlock-audit/2023-05-Index-judging/issues/169/#issuecomment-1610407489): accepted
+
+# Issue M-4: no validation to ensure the arbitrum sequencer is down 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/262 
 
@@ -407,7 +547,7 @@ recommend to add checks to ensure the sequencer is not down.
 
 Seems to be correct however I'm not sure regarding validity / severity since this is specific to L2 and not relevant for our current deployment strategy on Ethereum.
 
-# Issue M-4: Relying solely on oracle base slippage parameters can cause significant loss due to sandwich attacks 
+# Issue M-5: Relying solely on oracle base slippage parameters can cause significant loss due to sandwich attacks 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/285 
 
@@ -448,6 +588,7 @@ The solution to this is straight forward. Allow keepers to specify their own sli
 
 
 
+
 ## Discussion
 
 **ckoopmann**
@@ -470,7 +611,13 @@ Overall changing this to "confirmed" but unsure yet of wether we will actually f
 
 Great catch and fix seems reasonable. Valid medium
 
-# Issue M-5: Chainlink price feed is `deprecated`, not sufficiently validated and can return `stale` prices. 
+**ckoopmann**
+
+After extensive deliberation we decided to not fix this, as the suggested changes don't seem to justify the effort and might in fact open new attack vectors / issues.
+
+Given that we have had multiple years of experience with this setup in other leveraged tokens, without encountering issues the more conservative approach seems to keep it as is.
+
+# Issue M-6: Chainlink price feed is `deprecated`, not sufficiently validated and can return `stale` prices. 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/296 
 
@@ -521,7 +668,6 @@ The `latestRoundData` function should be used instead of the deprecated `latestA
 
 
 
-
 ## Discussion
 
 **0xffff11**
@@ -540,12 +686,18 @@ I switched to confirmed / disagree with severity as this issue is factually corr
 
 I do believe that this should remain as a medium. Not just for the impact stated by the watson, but also because Chainlink might simply not support it anymore in the future.
 
-# Issue M-6: The protocol does not compatible with token such as USDT because of the Approval Face Protection 
+**ckoopmann**
+
+Switched to using `latestRoundData` and adding a configurable maxPriceAge that is compared against the `updatedAt` value.
+Fixed in:
+https://github.com/IndexCoop/index-coop-smart-contracts/pull/142
+
+# Issue M-7: The protocol does not compatible with token such as USDT because of the Approval Face Protection 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/314 
 
 ## Found by 
-0x007, 0xStalin, Bauchibred, Ruhum, ShadowForce, bitsurfer, jasonxiale, jprod15, kutugu, n33k, rvierdiiev, shogoki, volodya
+0x007, 0xStalin, Ruhum, ShadowForce, jasonxiale, kutugu, n33k, rvierdiiev, shogoki, volodya
 ## Summary
 
 The protocol does not compatible with token such as USDT because of the Approval Face Protection
@@ -693,4 +845,393 @@ Valid medium
 **ckoopmann**
 
 Still having some final discussion internally over wether to fix this or explicitly list USDT as an incompatible token.
+
+**ckoopmann**
+
+Fixed in:
+https://github.com/IndexCoop/index-protocol/pull/22
+
+Specifically in the following commit by preceding any approve transaction with a 0 approval:
+https://github.com/IndexCoop/index-protocol/pull/22/commits/dae4d65ae8a95f9044b4c2edccaa394dbff451f3
+
+**bizzyvinci**
+
+@ckoopmann some of the duplicates such as #39 and #129 are about the AmmModule
+
+# Issue M-8: Operator is blocked when sequencer is down on Arbitrum 
+
+Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/321 
+
+## Found by 
+hildingr
+## Summary
+When the sequencer is down on Arbitrum state changes can still happen on L2 by passing them from L1 through the Delayed Inbox.
+
+Users can still interact with the Index protocol but due to how Arbitrum address aliasing functions the operator will be blocked from calling onlyOperator().
+
+## Vulnerability Detail
+
+The `msg.sender` of a transaction from the Delayed Inbox is aliased:
+
+```solidity
+L2_Alias = L1_Contract_Address + 0x1111000000000000000000000000000000001111
+```
+
+All functions with the `onlyOperator()` modifier are therefore blocked when the sequencer is down.
+
+The issue exists for all modifiers that are only callable by specific EOAs. But the operator of the Aave3LeverageStrategyExtension is the main security risk.
+
+## Impact
+
+The operator has roles that are vital for the safety of the protocol. Re-balancing and issuing/redeeming can still be done when the sequencer is down it is therefore important that the operator call the necessary functions to operate the protocol when the sequencer is down. 
+
+`disengage()` is an important safety function that the operator should always have access especially when the protocol is still in accessible to other users. Changing methodology and adding/removing exchanges are also important for the safety of the protocol. 
+
+## Code Snippet
+
+https://github.com/sherlock-audit/2023-05-Index/blob/3190057afd3085143a31746d65045a0d1bacc78c/index-coop-smart-contracts/contracts/manager/BaseManagerV2.sol#L113-L116
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+Change the `onlyOperator()` to check if the address is the aliased address of the operator.
+
+
+
+
+## Discussion
+
+**hildingr**
+
+Escalate for 10 USDC
+
+This is not a duplicate off #262 and should be a separate issue. 
+
+This is not about a check if a sequencer is down but rather a peculiarity on how Arbitrum aliases addresses. On the other L2s the manager is still able to reach all functions when the sequencer is down since the aliasing is not done on EOA's initiating a L1->L2 call.
+
+On Arbitrum this is not the case and the manager/operators are completely blocked from controlling the protocol when the sequencer is down. 
+
+As it stands on the other L2's the manager/operators can still govern over the protocol and use all the available safety features if the sequencer is down. As it stands this is not possible on Arbitrum.
+
+Low probability event where it would be crucial for operator/manager to have access:
+
+Sequencer is down for a prolonged time this could be some kind of attack or a technical issue, couple this with volatility in the market either due to the issues with the sequencer or unrelated. The governance should be able to change the safe parameters of position during such an event. 
+
+The recommended changes in the duplicates actually makes this worse in some cases since repaying debt is completely blocked when the sequencer is down. This is not the case for normal AAVE users which always have the ability to repay loans, this is an important safety feature guaranteed by AAVE.
+
+This can be taken further if the Index Team wishes to have the same safety level as a native AAVE user.
+
+New functionality can be  added to allow the operator to repay debt and de-leverage when the sequencer is down. This is a safety feature available to all AAVE users, AAVE users are never blocked from repaying debt but only from taking out additional loans when the sequencer is down. 
+
+This can be done by allowing a new operator L1Operator to access a new rebalancing feature, this L1Operator is a L1 smart-contract that uses L1 oracle data to initiate a L2 repayment of debt and rebalance when the sequencer is down.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This is not a duplicate off #262 and should be a separate issue. 
+> 
+> This is not about a check if a sequencer is down but rather a peculiarity on how Arbitrum aliases addresses. On the other L2s the manager is still able to reach all functions when the sequencer is down since the aliasing is not done on EOA's initiating a L1->L2 call.
+> 
+> On Arbitrum this is not the case and the manager/operators are completely blocked from controlling the protocol when the sequencer is down. 
+> 
+> As it stands on the other L2's the manager/operators can still govern over the protocol and use all the available safety features if the sequencer is down. As it stands this is not possible on Arbitrum.
+> 
+> Low probability event where it would be crucial for operator/manager to have access:
+> 
+> Sequencer is down for a prolonged time this could be some kind of attack or a technical issue, couple this with volatility in the market either due to the issues with the sequencer or unrelated. The governance should be able to change the safe parameters of position during such an event. 
+> 
+> The recommended changes in the duplicates actually makes this worse in some cases since repaying debt is completely blocked when the sequencer is down. This is not the case for normal AAVE users which always have the ability to repay loans, this is an important safety feature guaranteed by AAVE.
+> 
+> This can be taken further if the Index Team wishes to have the same safety level as a native AAVE user.
+> 
+> New functionality can be  added to allow the operator to repay debt and de-leverage when the sequencer is down. This is a safety feature available to all AAVE users, AAVE users are never blocked from repaying debt but only from taking out additional loans when the sequencer is down. 
+> 
+> This can be done by allowing a new operator L1Operator to access a new rebalancing feature, this L1Operator is a L1 smart-contract that uses L1 oracle data to initiate a L2 repayment of debt and rebalance when the sequencer is down.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**0xffff11**
+
+Thanks. I think the changes of this happening are slim to non. Sequencer has to be down and at the same time the operator rebalance. Also, I the operator is a multisig, not an EOA, unsure if that makes any difference, but still, I do not see the medium here. @IAm0x52 thoughts? 
+
+**IAm0x52**
+
+Due to the ripcord function always being available to prevent set token liquidation, low seems more appropriate to me.
+
+**0xffff11**
+
+Thanks for the second opinion. As said above, I agree with low
+
+**hrishibhat**
+
+Agree with the Lead Judge and Watson on this being low
+@hildingr 
+
+**hildingr**
+
+I will have to disagree here. The ripcord can not be trusted when the sequencer is down. The price could move in either direction while the Oracle price is stale.
+
+Imagine if the price is moving in a direction that would allow a ripcord pull, the ripcord can not be pulled since the oracle has the stale price. 
+
+On optimism and polygon the operator can call disengage() and stop the protocol from going above the max liquidation ratio. On Arbitrum this is not possible and the position can go way beyond the max LTV without being able to delever. The position could even get liquidated before ripcord or disengage can be called. If  0.95 < HF < 1 the position can be instantly liquidated when the sequencer comes back up since no grace period is given to heavily undercollateralized positions.
+
+**ckoopmann**
+
+I don't have a strong opinion on wether this is low or medium so will leave it up to the lead watson / judge to decide.
+
+Since we are not planning to deploy on arbitrum for now we will not act on this issue for now, but will review should we deploy this there in the future. 
+
+**hrishibhat**
+
+@hildingr 
+Additional comment from the Lead watson.
+> The key consideration here is that the main intention here is to keep the set token from becoming liquidated. So it doesn't really matter what the oracle is at whether it's stale or completely wrong. As long as the oracle being used by the set token matches AAVE then that's all that matters. So as I've stated, ripcord will always protect the set token so this is low
+
+**hildingr**
+
+> @hildingr Additional comment from the Lead watson.
+> 
+> > The key consideration here is that the main intention here is to keep the set token from becoming liquidated. So it doesn't really matter what the oracle is at whether it's stale or completely wrong. As long as the oracle being used by the set token matches AAVE then that's all that matters. So as I've stated, ripcord will always protect the set token so this is low
+
+I disagree, the ripcord will not always protect the position. I will give a concrete example:
+
+Stage 1, the sequencer is up: HF = 1.5 
+
+Stage 2, the sequencer is down: HF is -> 1. ripcord can not be pulled due to incorrect internal LTV.
+
+Stage 3, sequencer still down: HF < 0.95. 
+
+Stage 4, the moment the sequencer comes up: Race condition between instant liquidation and pulling the ripcord. This is because HF < 0.95 and no grace period is given by the AAVE sentinel.
+
+The true LTV always matters even if AAVE and Index use the same stale oracle. We can look at it as a discontinuity in the LTV, when the seq is down it is "unknown" to both protocols but in the instant the sequencer comes back the LTV jumps to the true value. The true LTV can be in very dangerous territory, possibly high enough for instant liquidation.
+
+**IAm0x52**
+
+> Stage 4, the moment the sequencer comes up: Race condition between instant liquidation and pulling the ripcord. This is because HF < 0.95 and no grace period is given by the AAVE sentinel.
+
+This is correct. it would create race conditions under these circumstances 
+
+
+
+**hrishibhat**
+
+Result:
+Medium
+Unique
+Considering this a valid medium based on the above comments 
+
+**sherlock-admin2**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [hildingr](https://github.com/sherlock-audit/2023-05-Index-judging/issues/321/#issuecomment-1613336884): accepted
+
+# Issue M-9: Oracle Price miss matched when E-mode uses single oracle 
+
+Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/323 
+
+## Found by 
+0x52, hildingr
+## Summary
+
+AAVE3 can turn on single oracle use on any E-mode category. When that is done collateral and the borrowed assets will be valued based on a single oracle price. When this is done the prices used in AaveLeverageStrategyExtension can differ from those used internally in AAVE3.
+
+This can lead to an increased risk of liquidation and failures to re-balance properly.
+
+## Vulnerability Detail
+There is currently no accounting for single oracle use in the AaveLeverageStragyExtension, if AAVE3 turns it on the extension will simply continue using its current oracles without accounting for the different prices.
+
+When re-balancing the following code calculate the `netBorrowLimit`/`netRepayLimit`:
+```solidity
+
+        if (_isLever) {
+            uint256 netBorrowLimit = _actionInfo.collateralValue
+                .preciseMul(maxLtvRaw.mul(10 ** 14))
+                .preciseMul(PreciseUnitMath.preciseUnit().sub(execution.unutilizedLeveragePercentage));
+
+            return netBorrowLimit
+                .sub(_actionInfo.borrowValue)
+                .preciseDiv(_actionInfo.collateralPrice);
+        } else {
+            uint256 netRepayLimit = _actionInfo.collateralValue
+                .preciseMul(liquidationThresholdRaw.mul(10 ** 14))
+                .preciseMul(PreciseUnitMath.preciseUnit().sub(execution.unutilizedLeveragePercentage));
+
+            return _actionInfo.collateralBalance
+                .preciseMul(netRepayLimit.sub(_actionInfo.borrowValue)) 
+                .preciseDiv(netRepayLimit);
+        
+```
+
+The `_actionInfo.collateralValue` and `_adminInfo.borrowValue` are `_getAndValidateLeverageInfo()` where they are both retrieved based on the current set chainlink oracle.
+
+When E-mode uses a single oracle price a de-pegging of one of the assets will lead to incorrect values of `netBorrowLimit`  and `netRepayLimit` depending on which asset is de-pegging.
+
+`collateralValue` or `borrowValue` can be either larger or smaller than how they are valued internally in AAVE3.
+
+## Impact
+
+When Levering 
+
+If `collateralValue` is to valued higher than internally in AAVE3 OR If `borrowValue` is to valued lower than internally in AAVE3:
+
+The `netBorrowLimit` is larger than it should be we are essentially going to overriding `execute.unutilizedLeveragePercentage` and attempting to borrow more than we should. 
+
+If `collateralValue` is valued lower than internally in AAVE3 OR If `borrowValue` is to valued higher than internally in AAVE3:
+
+The `netBorrowLimit` is smaller than it should be, we are not borrowing as much as we should. Levering up takes longer.
+
+When Delevering
+
+If `collateralValue` is to valued higher than internally in AAVE3 OR If `borrowValue` is to valued lower than internally in AAVE3:
+
+We will withdraw more collateral and repay more than specified by `execution.unutilizedLeveragePercentage`. 
+
+If `collateralValue` is  valued lower than internally in AAVE3 OR If `borrowValue` is to valued higher than internally in AAVE3:
+
+We withdraw less and repay less debt than we should. This means that both `ripcord()` and `disengage()` are not functioning as they, they will not delever as fast they should. We can look at it as `execution.unutilizedLeveragePercentage` not being throttled. 
+
+The above consequences show that important functionality is not working as expected. "overriding" `execution.unutilizedLeveragePercentage` is a serious safety concern.
+
+## Code Snippet
+
+https://github.com/sherlock-audit/2023-05-Index/blob/3190057afd3085143a31746d65045a0d1bacc78c/index-coop-smart-contracts/contracts/adapters/AaveLeverageStrategyExtension.sol#L1095-L1119
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+Aave3LeverageStrategyExtension should take single oracle usage into account. `_calcualteMaxBorrowCollateral` should check if there is a discrepancy and adjust such that the `execute.unutilizedLeveragePercentage` safety parameter is honored.
+
+
+
+## Discussion
+
+**sherlock-admin**
+
+> Escalate for 10 USDC
+> 
+> This issue is similar to #284 but is much more likely to happen in practice. If AAVE turns on single oracle for a category the oracles will be miss-configured this can lead to liquidation and other issues that I have outlined. 
+> 
+> This is more likely to happen than #284 since single oracle  is a feature of E-mode that can be turned on at any time for any E-mode category.
+> 
+> I want to escalate this to a valid Medium. I recommend that the index team implements functionality that take into account single oracle use which can be turned on at any point. 
+> 
+
+    You've deleted an escalation for this issue.
+
+**hildingr**
+
+Escalate for 10 USDC
+
+This issue is similar to #284 but is much more likely to happen in practice. If AAVE turns on single oracle for a category the oracles will be miss-configured this can lead to liquidation and other issues that I have outlined. 
+
+This is more likely to happen than #284 since single oracle  is a feature of E-mode that can be turned on at any time for any E-mode category.
+
+I want to escalate this to a valid Medium. I recommend that the index team implements functionality that take into account single oracle use which can be turned on at any point. 
+
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This issue is similar to #284 but is much more likely to happen in practice. If AAVE turns on single oracle for a category the oracles will be miss-configured this can lead to liquidation and other issues that I have outlined. 
+> 
+> This is more likely to happen than #284 since single oracle  is a feature of E-mode that can be turned on at any time for any E-mode category.
+> 
+> I want to escalate this to a valid Medium. I recommend that the index team implements functionality that take into account single oracle use which can be turned on at any point. 
+> 
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**0xffff11**
+
+Even using a single oracle in E-mode. Both implementations would still use chainlink right?
+
+**hildingr**
+
+Yes, but the issue is that when single oracle is turned on one of the assets will be guaranteed to use a different oracle feed in the Index Protocol compared to AAVE. AAVE and Index will value the asset differently which means that the calculations in _calculateMaxBorrowCollateral will be incorrect. 
+
+Example: 
+Initial state: Both index and AAVE use feed 1 for X and feed 2 for Y. Assume E-mode is activated.
+
+Single Oracle turned on: AAVE now uses feed 1 as the single oracle feed for the E-mode category, both X and Y will use feed 1.
+
+Now Y follows feed 1 on AAVE and feed 2 on Index. The calculations in _calculateChunkRebalanceNotional will as a result be incorrect. The magnitude of the error depends on how much and which direction the oracle feeds diverge in.
+
+**0xffff11**
+
+Thanks! Seems reasonable to me and I could see the medium here. Thoughts? @IAm0x52 
+
+**IAm0x52**
+
+Same underlying divergence issue as #284 though this one definitely has a better example of how that would happen. My take is that these should be duped then presented to Index team as well as Sherlock for a final severity discussion. 
+
+In the unlikely case that something like this does occur (oracles are different AND diverge) the consequences are tremendous. Ultimately the severity would come down to the likelihood. 
+
+**hildingr**
+
+I disagree that this and #284 are duplicates. The issue I identify can happen during the expected behavior of AAVE V3 due to new functionality added in V3 that has not been accounted for in Index.
+
+The likelihood is much larger since an Oracle feed mismatch is guaranteed to happen if Single Oracle is turned on. Single Oracle is a feature of AAVE V3, I therefore believe that it should not be considered an unlikely scenario to enter a state with mismatched feeds.
+
+
+**ckoopmann**
+
+Even though it could be seen as an "external" / "admin" feature, this issue raises a valid concern.
+Using the AaveOracle instead might acutally be the better choice and we will review internally if we want to make that fix / change.
+
+Therefore I will mark this issue as "Sponsor confirmed".
+
+While this issue seems to go into more detail of how oracle mismatch can happen, the core issue seems to be the same as 284.
+Therefore this response also applies to both issues. 
+
+**hildingr**
+
+
+
+
+> Even though it could be seen as an "external" / "admin" feature, this issue raises a valid concern. Using the AaveOracle instead might acutally be the better choice and we will review internally if we want to make that fix / change.
+> 
+> Therefore I will mark this issue as "Sponsor confirmed".
+> 
+> While this issue seems to go into more detail of how oracle mismatch can happen, the core issue seems to be the same as 284. Therefore this response also applies to both issues.
+
+I agree that #284 is an admin/external since it is a potential issue that arise due to admin changing a parameter that is "trusted". 
+
+What I point to is an issue that arise due to index protocol not handling a feature added to AAVE V3. AAVE V3 is built to use E-modes where single oracle is turned on and off, any such event would put index at risk. 
+
+I think it is incorrect to label an issue an "admin" issue if it is a consequence of incompatibility with a feature of a protocol being used as expected. 
+
+**hrishibhat**
+
+Result:
+Medium
+Has duplicates 
+After further discussions internally and the protocol. Considering this issue a valid medium as changing parameters in the external protocol affects index protocol as shown in the issue. 
+Also considering issue #284 as a duplicate the underlying issue originates from the external protocol due to a change in parameters/functionality by the external admin, affecting oracle price. 
+More context on the external admin trust assumptions is updated in the judging guide. 
+https://docs.sherlock.xyz/audits/judging/judging#some-standards-observed
+
+
+**sherlock-admin2**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [hildingr](https://github.com/sherlock-audit/2023-05-Index-judging/issues/323/#issuecomment-1613340700): accepted
 
