@@ -87,6 +87,10 @@ Agree with sponsor, valid high. Added missing duplicates
 Fixed in below pr by keeping track of the current eMode category id and then getting the data for that specific eMode (if eMode category is not 0):
 https://github.com/IndexCoop/index-coop-smart-contracts/pull/142
 
+**IAm0x52**
+
+Fix looks good. If emode is activated then it will use emode ltv and liquidation threshold
+
 # Issue H-2: _calculateMaxBorrowCollateral calculates repay incorrectly and can lead to set token liquidation 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/254 
@@ -141,6 +145,10 @@ The outlined issue and fix LGTM. We need to loosen the performed `netRepayLimit`
 
 Fixed in the below PR by removing the `unutilizedLeveragPercentage` adjustment as suggested:
 https://github.com/IndexCoop/index-coop-smart-contracts/pull/142
+
+**IAm0x52**
+
+Fix looks good. unutilizedLeveragePercentage is no longer used when calculating net repay
 
 # Issue M-1: setIncentiveSettings would be halt during a rebalance operation that gets stuck due to supply cap is reached at Aave 
 
@@ -235,6 +243,10 @@ Fixed the issue of settings being bricked in the mentioned scenario by adding an
 https://github.com/IndexCoop/index-coop-smart-contracts/pull/142/commits/edbe0b04a1966ada1e0a4f9c89cbb9e2f475a440
 
 Generally I don't see a way to reliably protect against hitting the supply cap, however it should not endanger users funds as redeeming as well as levering down are not affected. (only minting new set tokens as well as levering up would be blocked, which is a know limitation)
+
+**IAm0x52**
+
+Fix looks good. Operator can now manually override the `noRebalanceInProgress` modifier
 
 # Issue M-2: Protocol doesn't completely protect itself from `LTV = 0` tokens 
 
@@ -509,6 +521,14 @@ Escalations have been resolved successfully!
 Escalation status:
 - [Shogoki](https://github.com/sherlock-audit/2023-05-Index-judging/issues/169/#issuecomment-1610407489): accepted
 
+**pblivin0x**
+
+Fix opened in https://github.com/IndexCoop/index-protocol/pull/28
+
+**IAm0x52**
+
+Fix looks good. Non-empty return data is now checked to accommodate tokens that return false instead of reverting
+
 # Issue M-4: no validation to ensure the arbitrum sequencer is down 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/262 
@@ -692,6 +712,10 @@ Switched to using `latestRoundData` and adding a configurable maxPriceAge that i
 Fixed in:
 https://github.com/IndexCoop/index-coop-smart-contracts/pull/142
 
+**IAm0x52**
+
+Oracle was changed to AAVEOracle, which also fixed this issue
+
 # Issue M-7: The protocol does not compatible with token such as USDT because of the Approval Face Protection 
 
 Source: https://github.com/sherlock-audit/2023-05-Index-judging/issues/314 
@@ -857,6 +881,18 @@ https://github.com/IndexCoop/index-protocol/pull/22/commits/dae4d65ae8a95f9044b4
 **bizzyvinci**
 
 @ckoopmann some of the duplicates such as #39 and #129 are about the AmmModule
+
+**IAm0x52**
+
+As mentioned by @bizzyvinci this same change should be made to the AMM module as well
+
+**IAm0x52**
+
+Fix for AMM module [here](https://github.com/IndexCoop/index-protocol/pull/29/files) 
+
+**IAm0x52**
+
+Fixes look good and now always approve to 0 first
 
 # Issue M-8: Operator is blocked when sequencer is down on Arbitrum 
 
@@ -1234,4 +1270,14 @@ Escalations have been resolved successfully!
 
 Escalation status:
 - [hildingr](https://github.com/sherlock-audit/2023-05-Index-judging/issues/323/#issuecomment-1613340700): accepted
+
+**ckoopmann**
+
+Fixed in:
+https://github.com/IndexCoop/index-coop-smart-contracts/pull/142/commits/bed0e348e05e17e3c0e11be4cf6c22bf900abd36
+
+
+**IAm0x52**
+
+Fix looks good. Now using AAVE oracle so that oracles are always aligned 
 
